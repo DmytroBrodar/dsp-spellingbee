@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package spellingbee.v1;
+option go_package = "spellingbee/api/spellingbee/v1;gamepb";
+
+// this is our service. client can call these 2rpc methods on the server
+service SpellingBee{
+  rpc StartGame(StartRequest) returns (StartResponse);
+  rpc SubmitWord(WordRequest) returns (WordResponse);
+
+}
+
+message StartRequest{}
+message StartResponse{
+  // server send letters to the client
+  repeated string letters = 1;
+
+  // client must always use the center letter in a word
+  string center = 2;
+}
+
+message WordRequest{
+  // word that user typed in client
+  string word = 1;
+}
+
+message WordResponse{
+  // validation for word
+  bool valid = 1;
+
+  // message for user about validation (valid or not)
+  string message = 2;
+
+  // points for word
+  int32 score = 3;
+
+  // total points
+  int32 total = 4;
+}
+
+// create 2 files types and interface using terminal
+//    protoc --go_out="." --go_opt=paths=source_relative --go-grpc_out="." --go-grpc_opt=paths=source_relative "api/spellingbee/v1/game.proto"
