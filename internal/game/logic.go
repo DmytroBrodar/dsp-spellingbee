@@ -37,7 +37,7 @@ func (g *Game) ScoreWord(word string) int {
 	if len(w) > 4 {
 		points = len(w)
 	}
-	if isPangram(w, g.Letters) {
+	if IsPangram(w, g.Letters) {
 		points += 7
 	}
 	g.Score += points
@@ -45,7 +45,7 @@ func (g *Game) ScoreWord(word string) int {
 
 }
 
-func isPangram(w string, letters []rune) bool {
+func IsPangram(w string, letters []rune) bool {
 	for _, l := range letters {
 		if !strings.ContainsRune(w, l) {
 			return false

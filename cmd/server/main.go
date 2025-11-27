@@ -11,6 +11,8 @@ import (
 	"spellingbee/internal/dictionary/decorate"
 	"spellingbee/internal/game"
 	"spellingbee/internal/manager"
+	"spellingbee/internal/mq"
+	"spellingbee/internal/stats"
 
 	"google.golang.org/grpc"
 )
@@ -18,9 +20,10 @@ import (
 // our gRPC server type, implements the methods from proto
 type server struct {
 	gamepb.UnimplementedSpellingBeeServer
-
-	// keep dictionary here but decorator and proxied in main(), this shows dependency injection
-	dict dictionary.Dictionary
+	dict      dictionary.Dictionary
+	stats     *stats.Stats
+	statsFile string
+	pub       *mq.Publisher
 }
 
 // StartGame creates a new game using Factory, stores it in Singleton manager
@@ -45,26 +48,45 @@ func (s *server) StartGame(ctx context.Context, _ *gamepb.StartRequest) (*gamepb
 
 }
 
-// Submitword checks rules + dictionary and returns score
+// SubmitWord checks rules + dictionary and returns score
 func (s *server) SubmitWord(ctx context.Context, req *gamepb.WordRequest) (*gamepb.WordResponse, error) {
 	mgr := manager.Get()
 	if mgr.Game == nil {
 		return &gamepb.WordResponse{Valid: false, Message: "Game not started"}, nil
 	}
 
+	word := req.GetWord()
+
 	//local rules
 	ok, msg := mgr.Game.IsValidWord(req.GetWord())
 	if !ok {
+		s.stats.Update(false, 0, false, s.statsFile)
 		return &gamepb.WordResponse{Valid: false, Message: msg, Total: int32(mgr.Game.Score)}, nil
 	}
 
 	// dictionary check using decorator(logging) and proxy(caching)
 	if !s.dict.IsValid(req.GetWord()) {
+		s.stats.Update(false, 0, false, s.statsFile)
 		return &gamepb.WordResponse{Valid: false, Message: "Not a dictionary word", Total: int32(mgr.Game.Score)}, nil
 	}
 
 	// scoring
 	points := mgr.Game.ScoreWord(req.GetWord())
+
+	// check pangram
+	isPangram := game.IsPangram(word, mgr.Game.Letters)
+
+	// update stats as valid
+	s.stats.Update(true, points, isPangram, s.statsFile)
+
+	// if pangram found, publish event to rabbitMq in a goroutine
+	if isPangram && s.pub != nil {
+		go func(w string) {
+			if err := s.pub.PublishPangram(w); err != nil {
+				log.Println("failed to publish pangram:", err)
+			}
+		}(word)
+	}
 
 	return &gamepb.WordResponse{
 		Valid:   true,
@@ -76,6 +98,11 @@ func (s *server) SubmitWord(ctx context.Context, req *gamepb.WordRequest) (*game
 }
 
 func main() {
+	statsFile := "./internal/stats/stats.txt"
+
+	// load stats from file or create new stats
+	st := stats.LoadStats(statsFile)
+
 	lis, err := net.Listen("tcp", ":50051")
 	if err != nil {
 		log.Fatal(err)
@@ -86,10 +113,28 @@ func main() {
 	logged := decorate.WrapLogging(base)  // decoration
 	cached := dictionary.NewProxy(logged) // proxy
 
-	s := grpc.NewServer()
-	gamepb.RegisterSpellingBeeServer(s, &server{dict: cached})
+	rabbitUrl := "amqp://guest:guest@localhost:5672/"
+	exchange := "spellingbee.pangrams"
+
+	pub, err := mq.NewPublisher(rabbitUrl, exchange)
+	if err != nil {
+		log.Println("Couldn't connect to RabbitMQ:", err)
+	}
+
+	// Create server instance WITH stats
+	srv := &server{
+		dict:      cached,
+		stats:     st,
+		statsFile: statsFile,
+		pub:       pub,
+	}
+
+	grpcServer := grpc.NewServer()
+	gamepb.RegisterSpellingBeeServer(grpcServer, srv)
+
 	log.Println("Server running on :50051")
-	if err := s.Serve(lis); err != nil {
+
+	if err := grpcServer.Serve(lis); err != nil {
 		log.Fatal(err)
 	}
 }
